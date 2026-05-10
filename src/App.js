@@ -131,7 +131,7 @@ function App() {
   if (!session) {
     return (
       <div className="App" style={{padding: '50px', maxWidth: '400px', margin: '0 auto'}}>
-        <h2>Refinery Permit Login</h2>
+        <h2> Permit Approval Login</h2>
         <div style={{display: 'flex', flexDirection: 'column', gap: '10px'}}>
           <input type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} style={{padding: '10px'}} />
           <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} style={{padding: '10px'}} />
