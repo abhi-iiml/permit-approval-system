@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from './supabase';
 import './App.css';
+import { ReleaseNotesDrawer } from './ReleaseNotes';
 
 function App() {
   const [session, setSession] = useState(null);
@@ -9,6 +10,10 @@ function App() {
   const [password, setPassword] = useState('');
   const [allPermits, setAllPermits] = useState([]); // Dashboard List
   const [view, setView] = useState('dashboard'); // 'dashboard' or 'form'
+  const [hasNewUpdate, setHasNewUpdate] = useState(false);
+  const [incomingData, setIncomingData] = useState(null);
+  const [showReleaseNotes, setShowReleaseNotes] = useState(false);
+  const [hasSeenNotes, setHasSeenNotes] = useState(false);
   const nowTimestamp = new Date().toLocaleString('en-US', { 
   dateStyle: 'medium', 
   timeStyle: 'short' 
@@ -28,7 +33,8 @@ function App() {
     elpRequired: 'No',
     productionSubmitted: false, // Handover Flag 1
     electricalSubmitted: false, // Handover Flag 2
-    createdAt: '',         
+    createdAt: '',
+    createdBy: '',
     lastModifiedAt: '',   
     lastModifiedBy: ''
   };
@@ -49,6 +55,38 @@ function App() {
 
     return () => authListener.subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    // Only listen if we are actually looking at a form
+    if (view !== 'form' || !form.permitNo) return;
+
+    const channel = supabase
+      .channel(`public:form_fields:id=eq.${form.permitNo}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'form_fields',
+          filter: `id=eq.${form.permitNo}`
+        },
+        (payload) => {
+          const newData = JSON.parse(payload.new.field_value);
+          
+          // Only show the banner if SOMEONE ELSE made the change
+          if (session && newData.lastModifiedBy !== session.user.email) {
+            setIncomingData(newData);
+            setHasNewUpdate(true);
+          }
+        }
+      )
+      .subscribe();
+
+    // Clean up the watcher when we leave the form or change permits
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [view, form.permitNo, session]);
 
   // Fetch all permits for the dashboard
   const fetchAllPermits = async () => {
@@ -110,6 +148,7 @@ function App() {
       lastModifiedBy: session.user.email,
       lastModifiedAt: nowTimestamp,                  // (Always updates on save)
       createdAt: form.createdAt || nowTimestamp,     // (Only sets ONCE on creation)
+      createdBy: form.createdBy || session.user.email, // (Only sets ONCE on creation)
       productionSubmitted: myDept === 'Production' ? true : form.productionSubmitted,
       electricalSubmitted: myDept === 'Electrical' ? true : form.electricalSubmitted
     };
@@ -129,9 +168,85 @@ function App() {
       setOriginalForm(updatedForm);
       alert(`Success! Permit ${form.permitNo} submitted.`);
       fetchAllPermits();
-      setView('dashboard'); // Return to dashboard after save
+      //setView('dashboard'); // Return to dashboard after save
     } else {
       alert("Error Saving Data");
+    }
+    setLoading(false);
+  };
+
+  const handleRecall = async () => {
+    // 1. Dynamic confirmation based on who is logged in
+    const confirmRecall = window.confirm(`Are you sure you want to recall your ${myDept} submission?`);
+    if (!confirmRecall) return;
+
+    setLoading(true);
+
+    try {
+      // 2. THE FIX FOR DATA LOSS: Fetch the absolute freshest data from the database first!
+      const { data: dbData, error: fetchError } = await supabase
+        .from('form_fields')
+        .select('*')
+        .eq('id', form.permitNo)
+        .single();
+
+      if (fetchError || !dbData) {
+        alert("Could not verify permit status with the server.");
+        setLoading(false);
+        return;
+      }
+
+      // Parse the fresh data straight from the server
+      const freshForm = JSON.parse(dbData.field_value);
+
+      // 3. THE SAFETY GUARDRAIL: Did the next department save work while you had this page open?
+      if (myDept === 'Production' && (freshForm.electricalSubmitted || freshForm.elpStatus !== 'Pending' || freshForm.acceptance)) {
+        alert("Recall Denied: The Electrical or Maintenance department has already begun working on this permit.");
+        setForm(freshForm); // Update their screen with the new data!
+        setOriginalForm(freshForm);
+        setLoading(false);
+        return;
+      }
+
+      if (myDept === 'Electrical' && freshForm.acceptance) {
+        alert("Recall Denied: Maintenance has already accepted this permit.");
+        setForm(freshForm); // Update their screen with the new data!
+        setOriginalForm(freshForm);
+        setLoading(false);
+        return;
+      }
+
+      // 4. Safe to proceed! Flip the correct flag using the FRESH server data
+      const recalledForm = {
+        ...freshForm,
+        // If Production is recalling, flip productionSubmitted. If Electrical, flip electricalSubmitted.
+        productionSubmitted: myDept === 'Production' ? false : freshForm.productionSubmitted,
+        electricalSubmitted: myDept === 'Electrical' ? false : freshForm.electricalSubmitted,
+        lastModifiedBy: session.user.email,
+        lastModifiedAt: nowTimestamp
+      };
+
+      // 5. Save the safely modified package back to Supabase
+      const { error: saveError } = await supabase
+        .from('form_fields')
+        .upsert([{ 
+          id: form.permitNo, 
+          field_name: 'permit_data', 
+          field_value: JSON.stringify(recalledForm),
+          last_modified_by: session.user.email,
+          updated_at: new Date()
+        }]);
+
+      if (!saveError) {
+        setForm(recalledForm);
+        setOriginalForm(recalledForm);
+        alert(`Success! ${myDept} submission successfully recalled to Draft.`);
+        fetchAllPermits();
+      } else {
+        alert("Error saving the recall state.");
+      }
+    } catch (err) {
+      alert("An unexpected error occurred during recall.");
     }
     setLoading(false);
   };
@@ -153,9 +268,37 @@ function App() {
   if (view === 'dashboard') {
     return (
       <div className="App" style={{ padding: '20px', maxWidth: '800px', margin: '0 auto' }}>
-        <header style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '2px solid #333', paddingBottom: '10px' }}>
+        
+        {/* NEW: THE SLIDE-OUT DRAWER */}
+        <ReleaseNotesDrawer 
+          isOpen={showReleaseNotes} 
+          onClose={() => setShowReleaseNotes(false)} 
+        />
+
+        {/* UPDATED HEADER: Now includes What's New & Logout together */}
+        <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '2px solid #333', paddingBottom: '10px' }}>
           <h2>{myDept} Dashboard</h2>
-          <button onClick={() => supabase.auth.signOut()}>Logout</button>
+          
+          <div style={{ display: 'flex', gap: '15px' }}>
+            {/* WHAT'S NEW BUTTON */}
+            <button 
+              onClick={() => {
+                setShowReleaseNotes(true);
+                setHasSeenNotes(true); // Hides the red dot once clicked
+              }}
+              style={{ position: 'relative', padding: '8px 15px', background: '#f8f9fa', border: '1px solid #ccc', borderRadius: '4px', cursor: 'pointer' }}
+            >
+              🎁 What's New
+              {!hasSeenNotes && (
+                <span style={{
+                  position: 'absolute', top: '-5px', right: '-5px', height: '12px', width: '12px', 
+                  backgroundColor: 'red', borderRadius: '50%', display: 'inline-block', border: '2px solid white'
+                }}></span>
+              )}
+            </button>
+            
+            <button onClick={() => supabase.auth.signOut()} style={{ padding: '8px 15px' }}>Logout</button>
+          </div>
         </header>
 
         <div style={{ marginTop: '20px' }}>
@@ -198,7 +341,7 @@ function App() {
                           ? '⏳ Pending Electrical'
                           : '✅ Ready for Maintenance'
                     }
-</div>
+                  </div>
                 </div>
               ))}
             </div>
@@ -207,32 +350,111 @@ function App() {
       </div>
     );
   }
-
+  
   // --- FORM VIEW ---
+  const isProductionDisabled = myDept !== 'Production' || form.productionSubmitted;
+  const isElectricalDisabled = myDept !== 'Electrical' || form.electricalSubmitted;
+  //const hasNextDepartmentStarted = (form.elpRequired === 'Yes' && form.elpStatus !== 'Pending') || form.acceptance === true;
+  // 1. Who is allowed to recall right now?
+  const canProductionRecall = myDept === 'Production' && form.productionSubmitted && !form.electricalSubmitted && form.elpStatus === 'Pending' && !form.acceptance;
+  const canElectricalRecall = myDept === 'Electrical' && form.electricalSubmitted && !form.acceptance;
+
+  // 2. Combine them into a single switch to see if a Recall button should show at all
+  const showRecallButton = canProductionRecall || canElectricalRecall;
+
   return (
-    <div className="App" style={{ padding: '20px', maxWidth: '800px', margin: '0 auto', textAlign: 'left' }}>
-      <button onClick={() => setView('dashboard')} style={{ marginBottom: '10px' }}>← Back to Dashboard</button>
+ <div className="App" style={{ padding: '20px', maxWidth: '800px', margin: '0 auto', textAlign: 'left' }}>
+      
+      {/* UPDATED BACK BUTTON */}
+      <button 
+        onClick={() => { 
+          setView('dashboard'); 
+          setHasNewUpdate(false); 
+          setIncomingData(null); 
+        }} 
+        style={{ marginBottom: '10px' }}
+      >
+        ← Back to Dashboard
+      </button>
+
+      {/* THE LIVE ALERT BANNER */}
+      {hasNewUpdate && (
+        <div style={{ 
+          background: '#ffc107', 
+          color: '#333',
+          padding: '15px', 
+          borderRadius: '4px', 
+          marginBottom: '15px', 
+          display: 'flex', 
+          justifyContent: 'space-between', 
+          alignItems: 'center',
+          boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+        }}>
+          <span><strong>⚠️ Heads up!</strong> Another department just updated this permit. You are viewing old data.</span>
+          <button 
+            onClick={() => {
+              // Inject the fresh data, and hide the banner
+              setForm(incomingData);
+              setOriginalForm(incomingData);
+              setHasNewUpdate(false);
+            }}
+            style={{ 
+              background: '#333', 
+              color: '#fff', 
+              border: 'none', 
+              padding: '8px 15px', 
+              borderRadius: '4px', 
+              cursor: 'pointer',
+              fontWeight: 'bold'
+            }}
+          >
+            Refresh Data
+          </button>
+        </div>
+      )}
       
       <header style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '2px solid #333' }}>
         <h2>Permit: {form.permitNo}</h2>
       </header>
 
-      <section style={{ background: '#f8f9fa', borderLeft: '4px solid #007bff', padding: '15px', marginTop: '15px', borderRadius: '4px', fontSize: '14px', lineHeight: '1.6' }}>
-        <p style={{ margin: '0 0 8px 0' }}>
-          <strong>Status:</strong> {form.productionSubmitted ? (form.elpRequired === 'Yes' && !form.electricalSubmitted ? 'At Electrical' : 'Ready for Maintenance') : 'Draft'}
-        </p>
-        <p style={{ margin: '0 0 4px 0', color: '#555' }}>
-          <strong>Created At:</strong> {form.createdAt || 'Not Saved Yet (Draft)'}
-        </p>
-        {form.lastModifiedAt && (
-          <p style={{ margin: '0', color: '#555' }}>
-            <strong>Last Modified At:</strong> {form.lastModifiedAt} by <span style={{ textDecoration: 'underline' }}>{form.lastModifiedBy}</span>
-          </p>
-        )}
-      </section>
+       <section style={{ 
+  background: '#f8f9fa', 
+  borderLeft: '4px solid #007bff', 
+  padding: '15px 20px', 
+  marginTop: '15px', 
+  borderRadius: '4px', 
+  fontSize: '14px', 
+  lineHeight: '1.8' 
+}}>
+  <p style={{ margin: '0 0 10px 0', fontSize: '15px' }}>
+    <strong>Status:</strong> <span style={{ fontWeight: 'bold' }}>{form.productionSubmitted ? (form.elpRequired === 'Yes' && !form.electricalSubmitted ? 'At Electrical' : 'Ready for Maintenance') : 'Draft'}</span>
+  </p>
+  
+  <p style={{ margin: '0 0 6px 0', color: '#555' }}>
+    <strong>Created At:</strong> {form.createdAt || 'Not Saved Yet (Draft)'}
+  </p>
+
+  <p style={{ margin: '0 0 6px 0', color: '#555' }}>
+    <strong>Created By:</strong> {form.createdBy || 'Not Saved Yet (Draft)'}
+  </p>
+
+  {form.lastModifiedAt && (
+    <>
+      <hr style={{ border: '0', borderTop: '1px dashed #dee2e6', margin: '10px 0' }} />
+      
+      <p style={{ margin: '0 0 6px 0', color: '#555' }}>
+        <strong>Last Modified At:</strong> {form.lastModifiedAt}
+      </p>
+      
+      <p style={{ margin: '0', color: '#555' }}>
+        <strong>Last Modified By:</strong> {form.lastModifiedBy}
+      </p>
+    </>
+  )}
+</section>      
 
       {/* PRODUCTION SECTION */}
-      <fieldset style={{ marginTop: '20px', border: myDept === 'Production' ? '2px solid blue' : '1px solid #ccc' }}>
+      <fieldset style={{ marginTop: '20px', border: myDept === 'Production' ? '2px solid blue' : '1px solid #ccc' }} disabled={isProductionDisabled}>
         <legend><strong>Production Department</strong></legend>
         <label>Unit: </label>
         <select name="unit" value={form.unit} onChange={handleUpdate} disabled={myDept !== 'Production'}>
@@ -262,11 +484,14 @@ function App() {
 
       {/* ELECTRICAL SECTION */}
       {form.elpRequired === 'Yes' && (
-        <fieldset style={{ marginTop: '20px', border: myDept === 'Electrical' ? '2px solid blue' : '1px solid #ccc' }}>
+        <fieldset
+          style={{ marginTop: '20px', border: myDept === 'Electrical' ? '2px solid blue' : '1px solid #ccc' }}
+          disabled={isElectricalDisabled}
+        >
           <legend><strong>Electrical Department</strong></legend>
           <p>ELP No: {form.elpNo}</p>
           <label>Status: </label>
-          <input name="elpStatus" value={form.elpStatus} onChange={handleUpdate} disabled={myDept !== 'Electrical'} />
+          <input name="elpStatus" value={form.elpStatus} onChange={handleUpdate} />
         </fieldset>
       )}
 
@@ -291,17 +516,47 @@ function App() {
         </fieldset>
       )}
 
-      <button 
-        onClick={savePermit}
-        disabled={loading || JSON.stringify(form) === JSON.stringify(originalForm)}
-        style={{ 
-          marginTop: '20px', padding: '15px', width: '100%', 
-          background: (loading || JSON.stringify(form) === JSON.stringify(originalForm)) ? '#ccc' : 'green',
-          color: 'white', fontWeight: 'bold', cursor: 'pointer'
-        }}
-      >
-        {loading ? 'Saving...' : 'Submit / Handover Permit'}
-      </button>
+     {/* ACTION BUTTONS ROW */}
+      <div style={{ display: 'flex', gap: '15px', marginTop: '20px' }}>
+        
+        {/* UNIFIED RECALL BUTTON */}
+        {showRecallButton && (
+          <button 
+            onClick={handleRecall}
+            disabled={loading}
+            style={{ 
+              padding: '15px', 
+              flex: 1, 
+              background: '#dc3545', 
+              color: 'white', 
+              fontWeight: 'bold', 
+              border: 'none',
+              borderRadius: '4px',
+              cursor: loading ? 'not-allowed' : 'pointer'
+            }}
+          >
+            {loading ? 'Recalling...' : `↩ Recall ${myDept} Submission`}
+          </button>
+        )}
+
+        {/* SUBMIT / HANDOVER BUTTON */}
+        <button 
+          onClick={savePermit}
+          disabled={loading || JSON.stringify(form) === JSON.stringify(originalForm)}
+          style={{ 
+            padding: '15px', 
+            flex: 1, 
+            background: (loading || JSON.stringify(form) === JSON.stringify(originalForm)) ? '#ccc' : 'green',
+            color: 'white', 
+            fontWeight: 'bold', 
+            border: 'none',
+            borderRadius: '4px',
+            cursor: (loading || JSON.stringify(form) === JSON.stringify(originalForm)) ? 'not-allowed' : 'pointer'
+          }}
+        >
+          {loading ? 'Saving...' : 'Submit / Handover Permit'}
+        </button>
+      </div>
     </div>
   );
 }
