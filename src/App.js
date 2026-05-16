@@ -9,6 +9,10 @@ function App() {
   const [password, setPassword] = useState('');
   const [allPermits, setAllPermits] = useState([]); // Dashboard List
   const [view, setView] = useState('dashboard'); // 'dashboard' or 'form'
+  const nowTimestamp = new Date().toLocaleString('en-US', { 
+  dateStyle: 'medium', 
+  timeStyle: 'short' 
+  });
 
   const initialFormState = {
     permitNo: 'PERMIT-' + Math.floor(1000 + Math.random() * 9000),
@@ -24,6 +28,8 @@ function App() {
     elpRequired: 'No',
     productionSubmitted: false, // Handover Flag 1
     electricalSubmitted: false, // Handover Flag 2
+    createdAt: '',         
+    lastModifiedAt: '',   
     lastModifiedBy: ''
   };
 
@@ -102,6 +108,8 @@ function App() {
     const updatedForm = { 
       ...form, 
       lastModifiedBy: session.user.email,
+      lastModifiedAt: nowTimestamp,                  // (Always updates on save)
+      createdAt: form.createdAt || nowTimestamp,     // (Only sets ONCE on creation)
       productionSubmitted: myDept === 'Production' ? true : form.productionSubmitted,
       electricalSubmitted: myDept === 'Electrical' ? true : form.electricalSubmitted
     };
@@ -152,9 +160,21 @@ function App() {
 
         <div style={{ marginTop: '20px' }}>
           {myDept === 'Production' && (
-            <button 
-              onClick={() => { setForm(initialFormState); setOriginalForm(initialFormState); setView('form'); }}
-              style={{ marginBottom: '20px', padding: '10px', background: 'green', color: 'white', border: 'none', borderRadius: '5px' }}
+            <button
+              onClick={() => {
+                // 1. Grab the template but instantly stamp it with brand new, random numbers
+                const freshForm = {
+                  ...initialFormState,
+                  permitNo: 'PERMIT-' + Math.floor(1000 + Math.random() * 9000),
+                  elpNo: 'ELP-' + Math.floor(100 + Math.random() * 900)
+                };
+
+                // 2. Load this freshly stamped form onto the screen
+                setForm(freshForm);
+                setOriginalForm(freshForm);
+                setView('form');
+              }}
+              style={{ marginBottom: '20px', padding: '10px', background: 'green', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer' }}
             >
               + Create New Permit
             </button>
@@ -197,9 +217,18 @@ function App() {
         <h2>Permit: {form.permitNo}</h2>
       </header>
 
-      <section style={{ background: '#f4f4f4', padding: '10px', marginTop: '10px', borderRadius: '5px' }}>
-        <p><strong>Status:</strong> {form.productionSubmitted ? (form.elpRequired === 'Yes' && !form.electricalSubmitted ? 'At Electrical' : 'Ready for Maintenance') : 'Draft'}</p>
-        <p><strong>Last Modified By:</strong> {form.lastModifiedBy || 'New Permit'}</p>
+      <section style={{ background: '#f8f9fa', borderLeft: '4px solid #007bff', padding: '15px', marginTop: '15px', borderRadius: '4px', fontSize: '14px', lineHeight: '1.6' }}>
+        <p style={{ margin: '0 0 8px 0' }}>
+          <strong>Status:</strong> {form.productionSubmitted ? (form.elpRequired === 'Yes' && !form.electricalSubmitted ? 'At Electrical' : 'Ready for Maintenance') : 'Draft'}
+        </p>
+        <p style={{ margin: '0 0 4px 0', color: '#555' }}>
+          <strong>Created At:</strong> {form.createdAt || 'Not Saved Yet (Draft)'}
+        </p>
+        {form.lastModifiedAt && (
+          <p style={{ margin: '0', color: '#555' }}>
+            <strong>Last Modified At:</strong> {form.lastModifiedAt} by <span style={{ textDecoration: 'underline' }}>{form.lastModifiedBy}</span>
+          </p>
+        )}
       </section>
 
       {/* PRODUCTION SECTION */}
